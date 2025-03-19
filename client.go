@@ -1,4 +1,4 @@
-package client
+package main
 
 import (
 	"GuRPC/codec"
@@ -27,7 +27,7 @@ func (c *Call) done() {
 // Client RPC-Client 一个客户端可能同时被多个协程使用
 type Client struct {
 	c        codec.Codec
-	opt      *codec.Option
+	opt      *Option
 	locker   sync.Mutex
 	header   codec.Header
 	mu       sync.Mutex
@@ -123,7 +123,7 @@ func (c *Client) receive() {
 	c.terminateCalls(err)
 }
 
-func NewClient(conn net.Conn, opt *codec.Option) (*Client, error) {
+func NewClient(conn net.Conn, opt *Option) (*Client, error) {
 	f := codec.NewCodecFuncMap[opt.CodecType]
 	if f == nil {
 		err := fmt.Errorf("invalid codec type %s", opt.CodecType)
@@ -140,7 +140,7 @@ func NewClient(conn net.Conn, opt *codec.Option) (*Client, error) {
 }
 
 // 创建客户端编解码器
-func newClientCodec(c codec.Codec, opt *codec.Option) *Client {
+func newClientCodec(c codec.Codec, opt *Option) *Client {
 	client := &Client{
 		seq:     1, // 1有效，0无效
 		c:       c,
@@ -151,10 +151,10 @@ func newClientCodec(c codec.Codec, opt *codec.Option) *Client {
 	return client
 }
 
-func parseOptions(opts ...*codec.Option) (*codec.Option, error) {
+func parseOptions(opts ...*Option) (*Option, error) {
 	// 使用默认配置
 	if len(opts) == 0 || opts[0] == nil {
-		return codec.DefaultOption, nil
+		return DefaultOption, nil
 	}
 
 	if len(opts) != 1 {
@@ -162,14 +162,14 @@ func parseOptions(opts ...*codec.Option) (*codec.Option, error) {
 	}
 
 	opt := opts[0]
-	opt.SerialNum = codec.DefaultOption.SerialNum
+	opt.SerialNum = DefaultOption.SerialNum
 	if opt.CodecType == "" {
-		opt.CodecType = codec.DefaultOption.CodecType
+		opt.CodecType = DefaultOption.CodecType
 	}
 	return opt, nil
 }
 
-func Dial(network, addr string, opts ...*codec.Option) (c *Client, err error) {
+func Dial(network, addr string, opts ...*Option) (c *Client, err error) {
 	opt, err := parseOptions(opts...)
 	if err != nil {
 		return nil, err

@@ -1,45 +1,55 @@
 package main
 
 import (
-	"GuRPC/client"
-	"GuRPC/codec"
-	"fmt"
 	"log"
 	"net"
 	"sync"
 	"time"
 )
 
+type Foo int
+
+func (f Foo) Sum(args Args, reply *int) error {
+	*reply = args.Num1 + args.Num2
+	return nil
+}
+
 func main() {
+	log.SetFlags(0)
 	addr := make(chan string)
 	go startServer(addr)
-	c, _ := client.Dial("tcp", <-addr)
-	defer func() {
-		_ = c.Close()
-	}()
+	client, _ := Dial("tcp", <-addr)
+	defer func() { _ = client.Close() }()
+
 	time.Sleep(time.Second)
+	// send request & receive response
 	var wg sync.WaitGroup
-	for i := range 5 {
+	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			args := fmt.Sprintf("req %d", i)
-			var reply string
-			if err := c.Call("Foo.Sum", args, &reply); err != nil {
-				log.Fatal(err)
+			args := &Args{Num1: i, Num2: i * i}
+			var reply int
+			if err := client.Call("Foo.Sum", args, &reply); err != nil {
+				log.Fatal("call Foo.Sum error:", err)
 			}
-			log.Println(reply)
+			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
 		}(i)
 	}
 	wg.Wait()
 }
 
 func startServer(addr chan string) {
-	l, err := net.Listen("tcp", ":8080")
-	if err != nil {
-		log.Fatal("network error: ", err)
+	var foo Foo
+	if err := Register(&foo); err != nil {
+		log.Fatal("register error:", err)
 	}
-	log.Println("listening on :8080")
+	// pick a free port
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		log.Fatal("network error:", err)
+	}
+	log.Println("start rpc server on", l.Addr())
 	addr <- l.Addr().String()
-	codec.Accept(l)
+	Accept(l)
 }
