@@ -7,21 +7,26 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 const SerialNum = 0xa3bc8e
 
 type Option struct {
-	SerialNum int
-	CodecType codec.Type
+	SerialNum      int
+	CodecType      codec.Type
+	ConnectTimeout time.Duration
+	HandleTimeout  time.Duration
 }
 
 var DefaultOption = &Option{
-	SerialNum: SerialNum,
-	CodecType: codec.GobType,
+	SerialNum:      SerialNum,
+	CodecType:      codec.GobType,
+	ConnectTimeout: time.Second * 10,
 }
 
 type Server struct {
@@ -67,7 +72,7 @@ func (s *Server) ServeConn(conn io.ReadWriteCloser) {
 		log.Println("rpc server error(option)", opt.CodecType)
 		return
 	}
-	s.serveCodec(f(conn))
+	s.serveCodec(f(conn), &opt)
 }
 
 // 响应体占位符
@@ -76,7 +81,7 @@ var invalidRequest = struct{}{}
 // 处理请求
 // 并发处理请求
 // 按顺序发送请求，因为并发容易导致多个报文混乱，客户端无法解析
-func (s *Server) serveCodec(c codec.Codec) {
+func (s *Server) serveCodec(c codec.Codec, opt *Option) {
 	locker := new(sync.Mutex)
 	wg := &sync.WaitGroup{}
 	for {
@@ -90,7 +95,7 @@ func (s *Server) serveCodec(c codec.Codec) {
 			continue
 		}
 		wg.Add(1)
-		go s.handleRequest(c, req, locker, wg)
+		go s.handleRequest(c, req, locker, wg, opt.HandleTimeout)
 	}
 	wg.Wait()
 	_ = c.Close()
@@ -170,14 +175,37 @@ func (s *Server) sendResponse(c codec.Codec, h *codec.Header, body interface{}, 
 	}
 }
 
-func (server *Server) handleRequest(c codec.Codec, req *request, locker *sync.Mutex, wg *sync.WaitGroup) {
+func (server *Server) handleRequest(c codec.Codec, req *request, locker *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	err := req.sv.call(req.mType, req.arg, req.reply)
-	if err != nil {
-		req.h.Error = err.Error()
-		server.sendResponse(c, req.h, invalidRequest, locker)
+	called := make(chan struct{})
+	sent := make(chan struct{})
+
+	go func() {
+		err := req.sv.call(req.mType, req.arg, req.reply)
+		called <- struct{}{}
+		if err != nil {
+			req.h.Error = err.Error()
+			server.sendResponse(c, req.h, req.reply.Interface(), locker)
+			sent <- struct{}{}
+			return
+		}
+		server.sendResponse(c, req.h, req.reply.Interface(), locker)
+		sent <- struct{}{}
+	}()
+
+	if timeout == 0 {
+		<-called
+		<-sent
+		return
 	}
-	server.sendResponse(c, req.h, req.reply.Interface(), locker)
+
+	select {
+	case <-time.After(timeout):
+		req.h.Error = "rpc server: timeout"
+		server.sendResponse(c, req.h, req.reply.Interface(), locker)
+	case <-called:
+		<-sent
+	}
 }
 
 func Accept(lis net.Listener) { DefaultServer.Accept(lis) }
@@ -191,3 +219,41 @@ func (server *Server) Register(rcv interface{}) error {
 }
 
 func Register(rcvr interface{}) error { return DefaultServer.Register(rcvr) }
+
+const (
+	connected        = "200 connected to Gu RPC"
+	defaultRPCPath   = "/_gurpc_"
+	defaultDebugPath = "/debug/gurpc"
+)
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// 如果不是CONNECT请求，则拒绝请求
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+
+	// 劫持http连接
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Println("rpc hijacking", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	// 写入请求头，表明连接成功
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	s.ServeConn(conn)
+}
+
+// HandleHTTP 注册http处理器
+func (s *Server) HandleHTTP() {
+	http.Handle(defaultRPCPath, s)
+	http.Handle(defaultDebugPath, debugHTTP{s})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+// HandleHTTP 默认的http服务注册器
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
+}
